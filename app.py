@@ -12,28 +12,30 @@ import streamlit as st
 st.set_page_config(page_title="Pub Crawl 2026", page_icon="🍻", layout="wide")
 
 # ---------------------------------------------------------------------------
-# 1. THE PUBS (in crawl order). "query" is what we search to find the location.
+# 1. THE PUBS (in crawl order). "queries" are the searches used to find each pub.
 #    If one lands in the wrong place, fix it in the Admin tab (no code needed).
+#    "old_names" = earlier spellings, so saved locations still work after a rename.
 # ---------------------------------------------------------------------------
 PUBS = [
-    {"name": "Laurieston Bar",           "query": "Laurieston Bar, Bridge Street, Glasgow"},
-    {"name": "MacSorley's",              "query": "MacSorley's, Jamaica Street, Glasgow"},
-    {"name": "Sloans",                   "query": "Sloans, Argyll Arcade, Glasgow"},
-    {"name": "Cairns Bar",               "query": "Cairns Bar, Glasgow"},
-    {"name": "Poko Loko",                "query": "Poko Loko, Glasgow"},
-    {"name": "O'Neill's Merchant Square","query": "O'Neill's, Merchant Square, Glasgow"},
-    {"name": "Tap Yard Merchant Square", "query": "Tap Yard, Merchant Square, Glasgow"},
-    {"name": "Blane Valley",             "query": "Blane Valley, Glasgow"},
-    {"name": "Waxy O'Connor's",          "query": "Waxy O'Connor's, West George Street, Glasgow"},
-    {"name": "Stereo",                   "query": "Stereo, Renfield Lane, Glasgow"},
-    {"name": "Kitty",                  "query": "Kittie's, Glasgow"},
+    {"name": "Laurieston Bar",           "queries": ["Laurieston Bar, 58 Bridge Street, Glasgow", "Laurieston Bar, Glasgow"]},
+    {"name": "MacSorley's",              "queries": ["MacSorley's, Jamaica Street, Glasgow", "MacSorleys, Glasgow"]},
+    {"name": "Sloans",                   "queries": ["Sloans, 108 Argyle Street, Glasgow", "Sloans, Argyll Arcade, Glasgow", "G2 8BH"]},
+    {"name": "Cairns Bar",               "queries": ["Cairns Bar, 15 Miller Street, Glasgow", "Cairns Bar, Glasgow", "G1 1EA"]},
+    {"name": "Poko Loko",                "queries": ["Poko Loko, Glasgow", "Poko Loko Tequila and Tacos, Glasgow", "G1 1SH"]},
+    {"name": "O'Neill's Merchant Square","queries": ["O'Neill's, 71 Albion Street, Glasgow", "O'Neill's, Merchant Square, Glasgow", "G1 1NY"]},
+    {"name": "Tap Yard Merchant Square", "queries": ["The Tap Yard, Bell Street, Glasgow", "The Tap Yard, Glasgow", "G1 1NU"]},
+    {"name": "Blane Valley",             "queries": ["Blane Valley, Glasgow", "Blane Valley Bar, Glasgow"]},
+    {"name": "Waxy O'Connor's",          "queries": ["Waxy O'Connor's, West George Street, Glasgow", "Waxy O'Connors, Glasgow"]},
+    {"name": "Stereo",                   "queries": ["Stereo, Renfield Lane, Glasgow", "Stereo, Glasgow"]},
+    {"name": "Kitty",                    "queries": ["Kittie's, Glasgow", "Kitty's, Glasgow"], "old_names": ["Kitties"]},
 ]
 PUB_NAMES = [p["name"] for p in PUBS]
 
+# The admin password comes from Streamlit's Secrets (never written in the code).
 try:
-    ADMIN_PASSWORD = st.secrets.get("admin_password", "crawl")
+    ADMIN_PASSWORD = st.secrets["admin_password"]
 except Exception:
-    ADMIN_PASSWORD = "crawl"
+    ADMIN_PASSWORD = None
 
 STATE_FILE = Path("crawl_state.json")
 LOC_FILE = Path("locations.json")  # {"auto": {name: [lat, lon]}, "manual": {name: [lat, lon]}}
@@ -85,7 +87,7 @@ def reset_all():
 
 
 # ---------------------------------------------------------------------------
-# 3. Locations (auto-geocoded once, can be overridden manually)
+# 3. Locations (auto-found once, can be overridden manually)
 # ---------------------------------------------------------------------------
 def load_locs():
     if LOC_FILE.exists():
@@ -97,12 +99,22 @@ def save_locs(locs):
     LOC_FILE.write_text(json.dumps(locs, indent=2))
 
 
+def lookup(section, pub):
+    """Find a saved location by the pub's name, or by one of its old names."""
+    names = [pub["name"]] + pub.get("old_names", [])
+    for n in names:
+        if n in section:
+            return section[n]
+    return None
+
+
 def geocode(query):
+    """Search Nominatim, restricted to the Glasgow area. Postcodes work well too."""
     try:
         r = requests.get(
             "https://nominatim.openstreetmap.org/search",
             params={"q": query, "format": "json", "limit": 1, "countrycodes": "gb",
-                    "viewbox": "-4.40,55.92,-4.10,55.80", "bounded": 1},
+                    "viewbox": "-4.45,55.95,-4.05,55.78", "bounded": 1},
             headers=HEADERS, timeout=10,
         )
         data = r.json()
@@ -117,12 +129,15 @@ def ensure_geocoded(force=False):
     locs = load_locs()
     changed = False
     for p in PUBS:
-        if force or (p["name"] not in locs["auto"] and p["name"] not in locs["manual"]):
-            res = geocode(p["query"])
-            if res:
-                locs["auto"][p["name"]] = res
-                changed = True
-            time.sleep(1.1)  # be polite to the free geocoder (max 1 request/second)
+        known = lookup(locs["manual"], p) or lookup(locs["auto"], p)
+        if force or not known:
+            for q in p["queries"]:
+                res = geocode(q)
+                time.sleep(1.1)  # be polite to the free service (max 1 request/second)
+                if res:
+                    locs["auto"][p["name"]] = res
+                    changed = True
+                    break
     if changed:
         save_locs(locs)
     return locs
@@ -131,10 +146,10 @@ def ensure_geocoded(force=False):
 def get_positions():
     locs = load_locs()
     out = {}
-    for n in PUB_NAMES:
-        pos = locs["manual"].get(n) or locs["auto"].get(n)
+    for p in PUBS:
+        pos = lookup(locs["manual"], p) or lookup(locs["auto"], p)
         if pos:
-            out[n] = pos
+            out[p["name"]] = pos
     return out
 
 
@@ -194,7 +209,6 @@ def draw_map(positions, progress):
         (i, a), (_, b) = ordered[k], ordered[k + 1]
         leg = get_leg(tuple(positions[a]), tuple(positions[b]))
         (current if i + 1 == progress else faint).append({"path": leg["coords"]})
-    # leg towards the next pub (from the previous one)
     layers = [
         pdk.Layer("PathLayer", data=faint, get_path="path", get_color=[160, 170, 190, 160],
                   get_width=4, width_min_pixels=3),
@@ -205,8 +219,6 @@ def draw_map(positions, progress):
         pdk.Layer("TextLayer", data=df, get_position="[lon, lat]", get_text="order",
                   get_size=16, get_color=[255, 255, 255, 255]),
     ]
-    focus = df[df["order"] == str(min(progress, len(PUBS) - 1) + 1)]
-    centre = focus.iloc[0] if len(focus) else df.iloc[0]
     view = pdk.ViewState(latitude=float(df["lat"].mean()), longitude=float(df["lon"].mean()), zoom=14)
     st.pydeck_chart(pdk.Deck(
         layers=layers, initial_view_state=view,
@@ -270,12 +282,12 @@ with tab_crawl:
                             d = f" ({s['distance']:.0f} m)" if s["distance"] else ""
                             st.markdown(f"- {step_text(s)}{d}")
             st.link_button(
-                " Open walking directions in Google Maps",
+                "Open walking directions in Google Maps",
                 f"https://www.google.com/maps/dir/?api=1{origin_param}"
                 f"&destination={dest[0]},{dest[1]}&travelmode=walking",
             )
 
-        if st.button(f" We've arrived at {target} – reveal the rule", type="primary"):
+        if st.button(f"We've arrived at {target} – reveal the rule", type="primary"):
             set_progress(progress + 1)
             st.rerun()
 
@@ -327,7 +339,9 @@ with tab_rules:
 # ---- Admin ----
 with tab_admin:
     pw = st.text_input("Password", type="password")
-    if pw == ADMIN_PASSWORD:
+    if not ADMIN_PASSWORD:
+        st.info("Admin is locked because no admin_password has been set in Secrets.")
+    elif ADMIN_PASSWORD and pw == ADMIN_PASSWORD:
         st.markdown("#### Crawl progress")
         c1, c2 = st.columns(2)
         if c1.button("Go back one pub"):
@@ -337,7 +351,7 @@ with tab_admin:
             set_progress(progress + 1)
             st.rerun()
 
-        st.markdown("All assignments")
+        st.markdown("#### All assignments")
         st.dataframe(pd.DataFrame([
             {"#": i + 1, "Pub": n, "Rule": rules.get(n, {}).get("rule", "—"),
              "By": rules.get(n, {}).get("by", "—")} for i, n in enumerate(PUB_NAMES)
