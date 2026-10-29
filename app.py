@@ -51,7 +51,7 @@ def get_lock():
 
 
 def load_state():
-    state = {"rules": {}, "progress": 0}
+    state = {"rules": {}, "progress": 0, "skipped": []}
     if STATE_FILE.exists():
         state.update(json.loads(STATE_FILE.read_text()))
     return state
@@ -77,13 +77,28 @@ def submit_rule(rule, author):
 def set_progress(value):
     with get_lock():
         state = load_state()
-        state["progress"] = max(0, min(len(PUBS), value))
+        value = max(0, min(len(PUBS), value))
+        state["progress"] = value
+        # going back un-skips any pub that is ahead of the new position
+        state["skipped"] = [n for n in state["skipped"] if PUB_NAMES.index(n) < value]
         save_state(state)
+
+
+def skip_pub():
+    """Skip the next pub: move on without revealing its rule."""
+    with get_lock():
+        state = load_state()
+        if state["progress"] < len(PUBS):
+            name = PUB_NAMES[state["progress"]]
+            if name not in state["skipped"]:
+                state["skipped"].append(name)
+            state["progress"] += 1
+            save_state(state)
 
 
 def reset_all():
     with get_lock():
-        save_state({"rules": {}, "progress": 0})
+        save_state({"rules": {}, "progress": 0, "skipped": []})
 
 
 # ---------------------------------------------------------------------------
@@ -172,21 +187,6 @@ def get_leg(a, b):
         return {"coords": [[a[1], a[0]], [b[1], b[0]]], "steps": [], "distance": None, "duration": None}
 
 
-def step_text(s):
-    m = s["maneuver"]
-    t, mod = m.get("type", ""), m.get("modifier", "")
-    name = s.get("name") or "the path"
-    if t == "depart":
-        return f"Start on {name}"
-    if t == "arrive":
-        return "You have arrived 🍻"
-    if t in ("turn", "end of road", "fork", "off ramp", "on ramp"):
-        return f"Turn {mod} onto {name}" if mod != "straight" else f"Continue onto {name}"
-    if t == "roundabout":
-        return f"At the roundabout, continue onto {name}"
-    return f"Continue {mod} on {name}".replace("  ", " ")
-
-
 # ---------------------------------------------------------------------------
 # 5. Map
 # ---------------------------------------------------------------------------
@@ -241,6 +241,7 @@ positions = get_positions()
 state = load_state()
 progress = state["progress"]
 rules = state["rules"]
+skipped = state["skipped"]
 missing = [n for n in PUB_NAMES if n not in positions]
 if missing:
     st.warning("Couldn't locate: " + ", ".join(missing) + ". Set them in the Admin tab.")
@@ -266,34 +267,27 @@ with tab_crawl:
 
         if target in positions:
             dest = positions[target]
-            if progress == 0:
-                st.write("Head to the first pub")
-                origin_param = ""
-            else:
-                prev = PUB_NAMES[progress - 1]
-                origin_param = f"&origin={positions[prev][0]},{positions[prev][1]}" if prev in positions else ""
-                if prev in positions:
-                    leg = get_leg(tuple(positions[prev]), tuple(dest))
-                    if leg["distance"]:
-                        st.write(f"🚶 From **{prev}**: about {leg['distance']:.0f} m, "
-                                 f"~{max(1, round(leg['duration'] / 60))} min walk")
-                    with st.expander("Turn-by-turn directions", expanded=True):
-                        for s in leg["steps"]:
-                            d = f" ({s['distance']:.0f} m)" if s["distance"] else ""
-                            st.markdown(f"- {step_text(s)}{d}")
             st.link_button(
-                "Open walking directions in Google Maps",
-                f"https://www.google.com/maps/dir/?api=1{origin_param}"
-                f"&destination={dest[0]},{dest[1]}&travelmode=walking",
+                "Open in Google Maps",
+                f"https://www.google.com/maps/dir/?api=1&destination={dest[0]},{dest[1]}&travelmode=walking",
             )
 
         if st.button(f"We've arrived at {target} – reveal the rule", type="primary"):
             set_progress(progress + 1)
             st.rerun()
 
-    # rule for the pub we last arrived at
-    if progress > 0:
-        here = PUB_NAMES[progress - 1]
+        with st.popover("Skip this pub"):
+            st.write(f"Skip **{target}** and move on to the next pub? Its rule stays hidden.")
+            if st.button("Yes, skip it"):
+                skip_pub()
+                st.rerun()
+
+    # rule for the pub we last arrived at (skipped pubs don't count)
+    reached = [n for n in PUB_NAMES[:progress] if n not in skipped]
+    if progress > 0 and PUB_NAMES[progress - 1] in skipped:
+        st.caption(f"Skipped {PUB_NAMES[progress - 1]}.")
+    if reached:
+        here = reached[-1]
         st.divider()
         st.markdown(f"### Rule at {here}")
         entry = rules.get(here)
@@ -327,10 +321,12 @@ with tab_submit:
 # ---- Rules so far (only pubs already reached) ----
 with tab_rules:
     st.subheader("Rules from the pubs you've reached")
-    if progress == 0:
+    if not [n for n in PUB_NAMES[:progress] if n not in skipped]:
         st.write("Nothing revealed yet. Get to the first pub!")
     for i in range(progress):
         n = PUB_NAMES[i]
+        if n in skipped:
+            continue
         entry = rules.get(n)
         with st.container(border=True):
             st.markdown(f"**{i + 1}. {n}**")
