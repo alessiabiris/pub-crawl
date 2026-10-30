@@ -51,7 +51,7 @@ def get_lock():
 
 
 def load_state():
-    state = {"rules": {}, "progress": 0, "skipped": []}
+    state = {"rules": {}, "progress": 0, "skipped": [], "started": False}
     if STATE_FILE.exists():
         state.update(json.loads(STATE_FILE.read_text()))
     return state
@@ -96,9 +96,16 @@ def skip_pub():
             save_state(state)
 
 
+def set_started(value):
+    with get_lock():
+        state = load_state()
+        state["started"] = value
+        save_state(state)
+
+
 def reset_all():
     with get_lock():
-        save_state({"rules": {}, "progress": 0, "skipped": []})
+        save_state({"rules": {}, "progress": 0, "skipped": [], "started": False})
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +249,7 @@ state = load_state()
 progress = state["progress"]
 rules = state["rules"]
 skipped = state["skipped"]
+started = state["started"]
 missing = [n for n in PUB_NAMES if n not in positions]
 if missing:
     st.warning("Couldn't locate: " + ", ".join(missing) + ". Set them in the Admin tab.")
@@ -259,7 +267,9 @@ with tab_crawl:
         draw_map(positions, progress)
         st.caption("🟢 done · 🟠 next stop · ⚪ later · blue line = your current walk")
 
-    if progress >= len(PUBS):
+    if not started:
+        st.info("The crawl hasn't started yet. The organiser starts it from the Admin tab.")
+    elif progress >= len(PUBS):
         st.success("That's every pub. The crawl is complete!")
     else:
         target = PUB_NAMES[progress]
@@ -338,6 +348,18 @@ with tab_admin:
     if not ADMIN_PASSWORD:
         st.info("Admin is locked because no admin_password has been set in Secrets.")
     elif ADMIN_PASSWORD and pw == ADMIN_PASSWORD:
+        st.markdown("#### Start / stop the crawl")
+        if started:
+            st.success("The crawl is running.")
+            if st.button("Pause the crawl"):
+                set_started(False)
+                st.rerun()
+        else:
+            st.warning("The crawl hasn't started. Nobody can reveal rules yet.")
+            if st.button("Start the crawl", type="primary"):
+                set_started(True)
+                st.rerun()
+
         st.markdown("#### Crawl progress")
         c1, c2 = st.columns(2)
         if c1.button("Go back one pub"):
